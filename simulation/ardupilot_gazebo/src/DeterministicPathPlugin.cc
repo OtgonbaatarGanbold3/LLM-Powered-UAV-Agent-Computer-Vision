@@ -12,7 +12,6 @@
 #include <gz/sim/System.hh>
 #include <gz/sim/Util.hh>
 #include <gz/sim/components/Model.hh>
-#include <gz/sim/components/Pose.hh>
 
 namespace gz {
 namespace sim {
@@ -112,8 +111,8 @@ class DeterministicPathPlugin final :
     const math::Vector2d position =
         start + direction * (remaining / this->segmentLengths[segment]);
     const double yaw = std::atan2(direction.Y(), direction.X());
-    _ecm.SetComponentData<components::Pose>(
-        this->entity,
+    this->model.SetWorldPoseCmd(
+        _ecm,
         math::Pose3d(position.X(), position.Y(), this->height, 0, 0, yaw));
   }
 

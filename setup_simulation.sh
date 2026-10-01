@@ -29,8 +29,20 @@ for relative_path in \
   destination="$gazebo_root/$relative_path"
   if [[ -f "$destination" ]]; then
     if ! cmp -s "$source_file" "$destination"; then
-      echo "Gazebo file has local changes: $destination" >&2
-      exit 1
+      git_path="simulation/ardupilot_gazebo/$relative_path"
+      known_copy=false
+      for revision in $(git -C "$repo_root" log --format=%H -- "$git_path"); do
+        if git -C "$repo_root" show "$revision:$git_path" | cmp -s - "$destination"; then
+          known_copy=true
+          break
+        fi
+      done
+      if $known_copy; then
+        cp "$source_file" "$destination"
+      else
+        echo "Gazebo file has local changes: $destination" >&2
+        exit 1
+      fi
     fi
   else
     mkdir -p "$(dirname -- "$destination")"

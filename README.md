@@ -253,7 +253,9 @@ stream. It is also the one-command moving-target test: the red car with a yellow
 roof marker loops north of the drone, while the blue pedestrian with a cyan marker
 loops south of it. Both move at 0.75 m/s on deterministic 29.33-second paths. Their
 Gazebo model names are `target_car` and `target_person`. SITL is not required when
-only checking the target motion; use `./run_gazebo.sh -s` for a headless check.
+only checking the target motion; use `./run_gazebo.sh -s` for a headless check. The
+targets are dynamic models with gravity disabled; the path plugin commands their
+poses so both the drone camera and Gazebo world view receive their motion.
 
 The paths stay on opposite sides of the takeoff point and fit inside the 640 x 480
 camera view when the downward camera is centered from the planned 10 m test altitude.
