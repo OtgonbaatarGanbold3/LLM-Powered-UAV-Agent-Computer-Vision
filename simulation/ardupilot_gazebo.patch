@@ -1,0 +1,44 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 282358e..fd69984 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -117,0 +118,8 @@ target_link_libraries(ParachutePlugin PRIVATE
++add_library(DeterministicPathPlugin
++  SHARED
++  src/DeterministicPathPlugin.cc
++)
++target_link_libraries(DeterministicPathPlugin PRIVATE
++  gz-sim${GZ_SIM_VER}::gz-sim${GZ_SIM_VER}
++)
++
+@@ -152,0 +161 @@ install(
++  DeterministicPathPlugin
+@@ -185 +194 @@ if(${ament_cmake_FOUND})
+-endif()
+\ No newline at end of file
++endif()
+diff --git a/worlds/iris_runway.sdf b/worlds/iris_runway.sdf
+index 259ac71..a793bfc 100755
+--- a/worlds/iris_runway.sdf
++++ b/worlds/iris_runway.sdf
+@@ -37,4 +36,0 @@
+-      <latitude_deg>-35.363262</latitude_deg>
+-      <longitude_deg>149.165237</longitude_deg>
+-      <elevation>584</elevation>
+-      <heading_deg>0</heading_deg>
+@@ -41,0 +38,4 @@
++      <latitude_deg>37.550508</latitude_deg>
++      <longitude_deg>127.074579</longitude_deg>
++      <elevation>30.0</elevation>
++      <heading_deg>270</heading_deg>
+@@ -121,0 +122,10 @@
++    <!-- Moving targets stay on opposite sides of the takeoff point. -->
++    <include>
++      <uri>model://target_car</uri>
++      <pose>2 3 0.2 0 0 1.5708</pose>
++    </include>
++
++    <include>
++      <uri>model://target_person</uri>
++      <pose>-4 -3 0.2 0 0 -1.5708</pose>
++    </include>

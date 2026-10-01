@@ -1,0 +1,11 @@
+# Drone-in-a-Box (DBox) Custom Parameters for SITL
+# Load via: sim_vehicle.py -v ArduCopter -f gazebo-iris --model JSON --console --map --add-param-file=dbox.parm
+
+# Enable Lua Scripting Engine
+SCR_ENABLE 1
+
+# Lua VM instruction limit per step (increase for complex logic)
+SCR_VM_I_COUNT 200000
+
+# Heap memory allocated for scripting (in bytes)
+SCR_HEAP_SIZE 102400

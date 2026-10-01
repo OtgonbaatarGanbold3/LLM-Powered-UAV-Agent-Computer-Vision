@@ -1,0 +1,5 @@
+__pycache__/
+*.py[cod]
+
+# Local duplicate of ai_agent/drone_cv.py.
+/drone_cv.py

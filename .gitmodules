@@ -1,0 +1,8 @@
+[submodule "ardupilot-dbox"]
+	path = ardupilot-dbox
+	url = https://github.com/ArduPilot/ardupilot.git
+	ignore = dirty
+[submodule "gz_ws/src/ardupilot_gazebo"]
+	path = gz_ws/src/ardupilot_gazebo
+	url = https://github.com/ArduPilot/ardupilot_gazebo.git
+	ignore = dirty
