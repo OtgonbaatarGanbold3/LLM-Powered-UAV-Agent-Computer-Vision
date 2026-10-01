@@ -15,6 +15,7 @@ class MarkerDetectionTest(unittest.TestCase):
 
     def test_selects_yellow_car_marker_and_reports_normalized_error(self):
         frame = self.make_frame()
+        cv2.rectangle(frame, (43, 27), (77, 55), (0, 0, 220), -1)
         cv2.rectangle(frame, (50, 30), (70, 50), (0, 255, 255), -1)
 
         detection = drone_cv.detect_marker(frame, drone_cv.MARKERS["car"])
@@ -23,6 +24,19 @@ class MarkerDetectionTest(unittest.TestCase):
         self.assertAlmostEqual(detection.error_x, 0.0, places=2)
         self.assertAlmostEqual(detection.error_y, -0.2, places=2)
         self.assertGreater(detection.confidence, 0.9)
+
+    def test_rejects_long_yellow_field_strip_and_unpaired_yellow_patch(self):
+        frame = self.make_frame()
+        cv2.rectangle(frame, (5, 70), (114, 76), (0, 255, 255), -1)
+        cv2.rectangle(frame, (50, 30), (70, 50), (0, 255, 255), -1)
+
+        self.assertIsNone(drone_cv.detect_marker(frame, drone_cv.MARKERS["car"]))
+
+        cv2.rectangle(frame, (43, 27), (77, 55), (0, 0, 220), -1)
+        cv2.rectangle(frame, (50, 30), (70, 50), (0, 255, 255), -1)
+        detected = drone_cv.detect_marker(frame, drone_cv.MARKERS["car"])
+        self.assertIsNotNone(detected)
+        self.assertLess(detected.box[2], 30)
 
     def test_target_selection_ignores_other_marker_color(self):
         frame = self.make_frame()

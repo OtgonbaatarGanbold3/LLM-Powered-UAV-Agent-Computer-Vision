@@ -26,6 +26,7 @@ class MarkerSpec:
     hsv_upper: tuple
     min_area: float
     draw_color: tuple
+    requires_red_body: bool = False
 
 
 @dataclass(frozen=True)
@@ -39,7 +40,7 @@ class Detection:
 
 
 MARKERS = {
-    "car": MarkerSpec("yellow car marker", (18, 90, 90), (42, 255, 255), 25.0, (0, 255, 255)),
+    "car": MarkerSpec("yellow car marker", (18, 90, 90), (42, 255, 255), 25.0, (0, 255, 255), True),
     "person": MarkerSpec("cyan person marker", (78, 90, 90), (102, 255, 255), 5.0, (255, 255, 0)),
 }
 MORPH_KERNEL = np.ones((3, 3), np.uint8)
@@ -110,8 +111,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def detect_marker(frame_bgr, marker, min_area=None):
-    """Return the largest matching colored marker in a BGR image."""
+def detect_marker(frame_bgr, marker, min_area=None, reference=None):
+    """Find a compact marker; the car marker must sit beside a red body."""
     threshold = marker.min_area if min_area is None else min_area
     hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(
@@ -125,32 +126,54 @@ def detect_marker(frame_bgr, marker, min_area=None):
     if not contours:
         return None
 
-    contour = max(contours, key=cv2.contourArea)
-    area = cv2.contourArea(contour)
-    if area < threshold:
-        return None
-
-    moments = cv2.moments(contour)
-    if moments["m00"] == 0:
-        return None
-
     height, width = frame_bgr.shape[:2]
-    center = (
-        int(moments["m10"] / moments["m00"]),
-        int(moments["m01"] / moments["m00"]),
-    )
-    box = cv2.boundingRect(contour)
-    hull_area = cv2.contourArea(cv2.convexHull(contour))
-    solidity = area / hull_area if hull_area else 0.0
-    confidence = min(1.0, area / (threshold * 4.0)) * min(1.0, solidity)
-    return Detection(
-        box=box,
-        center=center,
-        area=area,
-        confidence=confidence,
-        error_x=(center[0] - width / 2.0) / (width / 2.0),
-        error_y=(center[1] - height / 2.0) / (height / 2.0),
-    )
+    red_mask = None
+    if marker.requires_red_body:
+        red_mask = cv2.inRange(hsv, (0, 90, 50), (12, 255, 255)) | cv2.inRange(
+            hsv, (170, 90, 50), (179, 255, 255)
+        )
+
+    for contour in sorted(contours, key=cv2.contourArea, reverse=True):
+        area = cv2.contourArea(contour)
+        if area < threshold:
+            break
+        x, y, box_width, box_height = cv2.boundingRect(contour)
+        if min(box_width, box_height) / max(box_width, box_height) < 0.25:
+            continue
+        hull_area = cv2.contourArea(cv2.convexHull(contour))
+        solidity = area / hull_area if hull_area else 0.0
+        if solidity < 0.65:
+            continue
+        if red_mask is not None:
+            pad_x, pad_y = max(8, box_width * 2), max(8, box_height * 2)
+            nearby_red = red_mask[
+                max(0, y - pad_y):min(height, y + box_height + pad_y),
+                max(0, x - pad_x):min(width, x + box_width + pad_x),
+            ]
+            if cv2.countNonZero(nearby_red) < max(8, area * 0.12):
+                continue
+        moments = cv2.moments(contour)
+        if moments["m00"] == 0:
+            continue
+        center = (
+            int(moments["m10"] / moments["m00"]),
+            int(moments["m01"] / moments["m00"]),
+        )
+        error_x = (center[0] - width / 2.0) / (width / 2.0)
+        error_y = (center[1] - height / 2.0) / (height / 2.0)
+        if reference is not None and ((error_x - reference.error_x) ** 2 +
+                                      (error_y - reference.error_y) ** 2) ** 0.5 > 0.35:
+            continue
+        confidence = min(1.0, area / (threshold * 4.0)) * solidity
+        return Detection(
+            box=(x, y, box_width, box_height),
+            center=center,
+            area=area,
+            confidence=confidence,
+            error_x=error_x,
+            error_y=error_y,
+        )
+    return None
 
 
 def decode_rgb_image(message):

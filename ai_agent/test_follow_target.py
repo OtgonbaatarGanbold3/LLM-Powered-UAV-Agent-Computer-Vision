@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import math
+from types import SimpleNamespace
 import unittest
 
 from pymavlink import mavutil
@@ -55,68 +57,107 @@ class FollowControllerTest(unittest.TestCase):
         return follow_target.FollowController(
             acquire_frames=2,
             detection_timeout=0.5,
-            smoothing=1.0,
-            max_acceleration=10.0,
-            max_speed=1.0,
         )
 
     def test_requires_stable_detections_before_tracking(self):
         controller = self.make_controller()
 
-        first = controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
-        second = controller.step(detection(), 2, 0.1, 0.1, True, 0.1)
+        first = controller.step(detection(), 1, 0.0, 0.0, True)
+        second = controller.step(detection(), 2, 0.1, 0.1, True)
 
         self.assertEqual(first, follow_target.VelocityCommand())
         self.assertEqual(controller.state, follow_target.FollowState.TRACK)
-        self.assertGreater(second.forward, 0.0)
-        self.assertGreater(second.right, 0.0)
+        self.assertEqual(second, follow_target.VelocityCommand())
 
     def test_brief_miss_holds_track_then_timeout_sends_zero(self):
         controller = self.make_controller()
-        controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
-        controller.step(detection(), 2, 0.1, 0.1, True, 0.1)
+        controller.step(detection(), 1, 0.0, 0.0, True)
+        controller.step(detection(), 2, 0.1, 0.1, True)
 
-        brief_miss = controller.step(None, 3, 0.1, 0.2, True, 0.1)
-        lost = controller.step(None, 4, 0.1, 0.7, True, 0.1)
+        brief_miss = controller.step(None, 3, 0.1, 0.2, True)
+        self.assertEqual(controller.state, follow_target.FollowState.TRACK)
+        lost = controller.step(None, 4, 0.1, 0.7, True)
 
-        self.assertNotEqual(brief_miss, follow_target.VelocityCommand())
+        self.assertEqual(brief_miss, follow_target.VelocityCommand())
         self.assertEqual(lost, follow_target.VelocityCommand())
         self.assertEqual(controller.state, follow_target.FollowState.LOST)
 
     def test_vehicle_gate_sends_immediate_zero(self):
         controller = self.make_controller()
-        controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
-        controller.step(detection(), 2, 0.1, 0.1, True, 0.1)
+        controller.step(detection(), 1, 0.0, 0.0, True)
+        controller.step(detection(), 2, 0.1, 0.1, True)
 
-        gated = controller.step(detection(), 3, 0.2, 0.2, False, 0.1)
+        gated = controller.step(detection(), 3, 0.2, 0.2, False)
 
         self.assertEqual(gated, follow_target.VelocityCommand())
         self.assertEqual(controller.state, follow_target.FollowState.IDLE)
 
     def test_manual_stop_sends_zero_without_losing_process(self):
         controller = self.make_controller()
-        controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
-        controller.step(detection(), 2, 0.1, 0.1, True, 0.1)
+        controller.step(detection(), 1, 0.0, 0.0, True)
+        controller.step(detection(), 2, 0.1, 0.1, True)
 
         controller.toggle()
-        stopped = controller.step(detection(), 3, 0.2, 0.2, True, 0.1)
+        stopped = controller.step(detection(), 3, 0.2, 0.2, True)
 
         self.assertFalse(controller.enabled)
         self.assertEqual(stopped, follow_target.VelocityCommand())
         self.assertEqual(controller.state, follow_target.FollowState.IDLE)
 
     def test_fixed_tracking_without_pursuit_sends_zero(self):
-        controller = follow_target.FollowController(
-            acquire_frames=1, follow_motion_enabled=False
-        )
+        controller = follow_target.FollowController(acquire_frames=1)
 
-        command = controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
+        command = controller.step(detection(), 1, 0.0, 0.0, True)
 
         self.assertEqual(controller.state, follow_target.FollowState.TRACK)
         self.assertEqual(command, follow_target.VelocityCommand())
 
 
 class SearchControllerTest(unittest.TestCase):
+    def test_gimbal_tracking_respects_accepted_pitch_limit(self):
+        controller = follow_target.SearchController(target="car")
+        controller._aim_gimbal(detection(0.0, 1.0), 10.0)
+        self.assertEqual(controller.pitch, -90.0)
+
+    def test_active_pursuit_uses_camera_pose_and_stops_on_stale_pose(self):
+        controller = follow_target.SearchController(target="car", max_speed=1.0)
+        controller.state = follow_target.SearchState.TRACK
+        camera = follow_target.CameraPose(
+            (0.0, 0.0, 10.0),
+            (math.sqrt(0.5), 0.0, math.sqrt(0.5), 0.0),
+            0.0,
+        )
+        result = controller.step(
+            detection(0.0, -0.4), 1, 0.0, 0.0, 0.1, True,
+            (0.0, 0.0, -10.0), 0.0, 10.0, camera,
+        )
+        self.assertGreater(result.velocity.right, 0.0)
+        self.assertAlmostEqual(result.target_forward, 0.0, delta=0.01)
+        self.assertGreater(result.target_right, 4.0)
+
+        stale = controller.step(
+            detection(0.0, -0.4), 2, 0.4, 0.4, 0.1, True,
+            (0.0, 0.0, -10.0), 0.0, 10.0, camera,
+        )
+        self.assertEqual(stale.velocity, follow_target.VelocityCommand())
+        self.assertEqual(controller.geometry_error, "camera pose unavailable")
+
+    def test_camera_pose_composes_nested_gazebo_frames(self):
+        def pose(name, position, orientation):
+            return SimpleNamespace(
+                name=name,
+                position=SimpleNamespace(**dict(zip("xyz", position))),
+                orientation=SimpleNamespace(**dict(zip("wxyz", orientation))),
+            )
+
+        vehicle = pose("iris_with_gimbal", (2, 3, 10), (1, 0, 0, 0))
+        gimbal = pose("gimbal", (0, 0, -0.1), (1, 0, 0, 0))
+        pitch = pose("pitch_link", (0, 0, 0.02), (1, 0, 0, 0))
+        camera = follow_target.camera_pose_from_links(vehicle, gimbal, pitch, 5.0)
+
+        self.assertEqual(camera.position, (2.0, 3.0, 9.92))
+        self.assertEqual(camera.observed_at, 5.0)
+
     def test_tracking_without_pursuit_keeps_drone_stationary(self):
         controller = follow_target.SearchController(target="car", follow_motion_enabled=False)
         controller.state = follow_target.SearchState.TRACK

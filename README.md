@@ -315,7 +315,7 @@ For a timed test without a window:
 ```
 
 After arming in GUIDED, taking off to 10 m, and pointing the gimbal down, run the
-fixed-camera tracker with:
+fixed-camera diagnostic tracker (it does not command pursuit) with:
 
 ```bash
 ./run_ai_agent.sh follow --target car
@@ -334,22 +334,23 @@ left-to-right across three pitch rows (-85° to -45° by default). The terminal 
 `vehicle gate: ...` whenever the armed, GUIDED, altitude, heartbeat, local-position,
 or heading gate changes. The camera overlay also shows the current gate. If a complete
 raster finds no target, a small expanding spiral and circle starts (1.5 m radius,
-0.2 m/s) while the gimbal keeps scanning. A detected marker stops search movement;
-the gimbal centers it while the drone holds position. Active pursuit is disabled by
-default because the current camera-to-body projection has not passed a Gazebo
-world-position check. Search movement stops after 90 seconds or if the aircraft
+0.2 m/s) while the gimbal keeps scanning. A detected car marker stops search movement;
+the gimbal centers it while the drone holds position. After a stable lock, the drone
+follows at a 2.5 m standoff. Pursuit projects the detected image point through the
+measured Gazebo camera pose onto the target-height plane. If camera pose or detection
+goes stale, pursuit stops. Use `--no-follow-motion` to inspect tracking and gimbal
+behavior without target pursuit; the bounded search fallback can still move if no
+target is found. Search movement stops after 90 seconds or if the aircraft
 exceeds 2.5 m from its recorded search center. Tune the scan with `--scan-yaw-min`,
 `--scan-yaw-max`, `--scan-pitch-min`, `--scan-pitch-max`, `--scan-pitch-step`, and
 `--scan-rate`; tune the fallback with `--search-radius`, `--search-speed`, and
 `--search-timeout`.
 
-Both follow modes require fresh local-position telemetry and stop issuing movement
-commands 5 m from where the follower started; restart the follower to reset this
-boundary. The default pursuit speed is 0.5 m/s. `--enable-follow-motion` permits
-experimental active pursuit in SITL, with `--camera-yaw-offset` available for
-calibration. A car can stay centered in the image even when the drone moves away
-from it, so use Gazebo world pose or telemetry to confirm actual tracking before
-enabling pursuit on a real vehicle.
+Both follow modes require fresh local-position telemetry. Search pursuit stops issuing
+movement commands 12 m from where the follower started; restart the follower to reset
+this boundary. The default pursuit speed is capped at 1.0 m/s. The camera-pose source
+and target-height assumption are specific to this Gazebo model, so real-world pursuit
+needs a calibrated camera pose and a range/depth source before flight.
 
 To confirm target models are moving in Gazebo independently of the camera, run this
 in another terminal while Gazebo is running:

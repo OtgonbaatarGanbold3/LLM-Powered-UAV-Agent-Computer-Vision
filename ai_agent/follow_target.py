@@ -11,6 +11,7 @@ import time
 
 import cv2
 from gz.msgs10.image_pb2 import Image as GzImage
+from gz.msgs10.pose_v_pb2 import Pose_V
 from gz.transport13 import Node
 from pymavlink import mavutil
 
@@ -20,10 +21,6 @@ import drone_cv
 CONTROL_RATE_HZ = 10.0
 ACQUIRE_FRAMES = 5
 DETECTION_TIMEOUT = 0.4
-DEADBAND = 0.03
-PROPORTIONAL_GAIN = 10.0
-INTEGRAL_GAIN = 1.0
-SMOOTHING = 0.4
 MAX_ACCELERATION = 2.0
 MINIMUM_ALTITUDE = 1.0
 TELEMETRY_TIMEOUT = 2.5
@@ -33,6 +30,102 @@ CAMERA_HEIGHT = 480
 CAMERA_VERTICAL_FOV = 2.0 * math.atan(
     math.tan(CAMERA_HORIZONTAL_FOV / 2.0) * CAMERA_HEIGHT / CAMERA_WIDTH
 )
+CAMERA_POSE_TOPIC = "/world/iris_runway/dynamic_pose/info"
+CAMERA_POSE_TIMEOUT = 0.3
+MAX_TARGET_RANGE = 25.0
+
+
+def quaternion_multiply(a, b):
+    aw, ax, ay, az = a
+    bw, bx, by, bz = b
+    return (
+        aw * bw - ax * bx - ay * by - az * bz,
+        aw * bx + ax * bw + ay * bz - az * by,
+        aw * by - ax * bz + ay * bw + az * bx,
+        aw * bz + ax * by - ay * bx + az * bw,
+    )
+
+
+def rotate_vector(q, vector):
+    w, x, y, z = q
+    vx, vy, vz = vector
+    tx, ty, tz = 2 * (y * vz - z * vy), 2 * (z * vx - x * vz), 2 * (x * vy - y * vx)
+    return (
+        vx + w * tx + y * tz - z * ty,
+        vy + w * ty + z * tx - x * tz,
+        vz + w * tz + x * ty - y * tx,
+    )
+
+
+def pose_quaternion(pose):
+    return pose.orientation.w, pose.orientation.x, pose.orientation.y, pose.orientation.z
+
+
+def compose_pose(position, orientation, child):
+    translated = rotate_vector(
+        orientation, (child.position.x, child.position.y, child.position.z)
+    )
+    return (
+        tuple(position[i] + translated[i] for i in range(3)),
+        quaternion_multiply(orientation, pose_quaternion(child)),
+    )
+
+
+def camera_mount_quaternion():
+    # SDF camera pose on pitch_link: roll=-1.57, pitch=-1.57, yaw=0.
+    roll, pitch = -1.57 / 2.0, -1.57 / 2.0
+    return (
+        math.cos(roll) * math.cos(pitch),
+        math.sin(roll) * math.cos(pitch),
+        math.cos(roll) * math.sin(pitch),
+        -math.sin(roll) * math.sin(pitch),
+    )
+
+
+CAMERA_MOUNT_QUATERNION = camera_mount_quaternion()
+
+
+@dataclass(frozen=True)
+class CameraPose:
+    position: tuple
+    orientation: tuple
+    observed_at: float
+
+
+def camera_pose_from_links(vehicle_pose, gimbal_pose, pitch_pose, now):
+    position, orientation = compose_pose(
+        (vehicle_pose.position.x, vehicle_pose.position.y, vehicle_pose.position.z),
+        pose_quaternion(vehicle_pose),
+        gimbal_pose,
+    )
+    position, orientation = compose_pose(position, orientation, pitch_pose)
+    return CameraPose(
+        position,
+        quaternion_multiply(orientation, CAMERA_MOUNT_QUATERNION),
+        now,
+    )
+
+
+def target_body_offset(detection, camera_pose, vehicle_yaw, target_height):
+    """Intersect the detected image ray with the target-height plane."""
+    camera_ray = (
+        1.0,
+        -detection.error_x * math.tan(CAMERA_HORIZONTAL_FOV / 2.0),
+        -detection.error_y * math.tan(CAMERA_VERTICAL_FOV / 2.0),
+    )
+    world_ray = rotate_vector(camera_pose.orientation, camera_ray)
+    if world_ray[2] >= -0.05:
+        return None
+    distance = (target_height - camera_pose.position[2]) / world_ray[2]
+    if distance <= 0 or distance * math.sqrt(sum(v * v for v in world_ray)) > MAX_TARGET_RANGE:
+        return None
+
+    # iris_with_gimbal.sdf maps Gazebo +Y to NED north and +X to NED east.
+    north, east = distance * world_ray[1], distance * world_ray[0]
+    heading = math.radians(vehicle_yaw)
+    forward = math.cos(heading) * north + math.sin(heading) * east
+    right = -math.sin(heading) * north + math.cos(heading) * east
+    return forward, right
 
 
 class FollowState(Enum):
@@ -84,8 +177,8 @@ class SearchController:
         scan_yaw_min=-60.0,
         scan_yaw_max=60.0,
         scan_rate=30.0,
-        camera_yaw_offset=0.0,
         follow_motion_enabled=True,
+        follow_distance=2.5,
     ):
         self.target = target
         self.max_speed = max_speed
@@ -98,8 +191,9 @@ class SearchController:
         self.scan_yaw_min = scan_yaw_min
         self.scan_yaw_max = scan_yaw_max
         self.scan_rate = scan_rate
-        self.camera_yaw_offset = camera_yaw_offset
         self.follow_motion_enabled = follow_motion_enabled
+        self.follow_distance = follow_distance
+        self.geometry_error = None
         self.state = SearchState.RASTER
         self.enabled = True
         self.origin = None
@@ -147,6 +241,7 @@ class SearchController:
         position,
         vehicle_yaw,
         altitude,
+        camera_pose=None,
     ):
         if not self.enabled or not vehicle_ready:
             self.command = VelocityCommand()
@@ -238,24 +333,36 @@ class SearchController:
                 return self._output()
 
             if not self.follow_motion_enabled:
+                self.geometry_error = None
                 self.command = VelocityCommand()
                 return self._output()
 
-            forward, right = self._target_offset(
-                current_detection, self.pitch, self.yaw, altitude
+            if camera_pose is None or now - camera_pose.observed_at > CAMERA_POSE_TIMEOUT:
+                self.geometry_error = "camera pose unavailable"
+                self.command = VelocityCommand()
+                return self._output()
+            if detection is None or now - observation_time > 0.2:
+                self.geometry_error = "target detection stale"
+                self.command = VelocityCommand()
+                return self._output()
+
+            marker_height = 1.78 if self.target == "person" else 0.405
+            offset = target_body_offset(detection, camera_pose, vehicle_yaw, marker_height)
+            if offset is None:
+                self.geometry_error = "target ray misses ground"
+                self.command = VelocityCommand()
+                return self._output()
+            self.geometry_error = None
+            forward, right = offset
+            distance = math.hypot(forward, right)
+            speed = min(self.max_speed, 0.6 * max(0.0, distance - self.follow_distance))
+            desired_forward = speed * forward / distance if distance else 0.0
+            desired_right = speed * right / distance if distance else 0.0
+            max_change = MAX_ACCELERATION * max(elapsed, 0.0)
+            self.command = VelocityCommand(
+                self._slew_angle(self.command.forward, desired_forward, max_change),
+                self._slew_angle(self.command.right, desired_right, max_change),
             )
-            desired_forward = self._approach_velocity(
-                forward, self.command.forward, elapsed
-            )
-            desired_right = self._approach_velocity(
-                right, self.command.right, elapsed
-            )
-            magnitude = math.hypot(desired_forward, desired_right)
-            if magnitude > self.max_speed:
-                scale = self.max_speed / magnitude
-                desired_forward *= scale
-                desired_right *= scale
-            self.command = VelocityCommand(desired_forward, desired_right)
             return self._output(
                 target_forward=forward,
                 target_right=right,
@@ -269,7 +376,7 @@ class SearchController:
         yaw_correction = detection.error_x * math.degrees(CAMERA_HORIZONTAL_FOV / 2.0)
         self.pitch = self._slew_angle(
             self.pitch,
-            max(-135.0, min(45.0, self.pitch + pitch_correction)),
+            max(-90.0, min(45.0, self.pitch + pitch_correction)),
             20.0 * elapsed,
         )
         self.yaw = self._slew_angle(
@@ -332,27 +439,6 @@ class SearchController:
             self.origin[2],
         )
 
-    def _target_offset(self, detection, pitch, gimbal_yaw, altitude):
-        marker_height = 1.78 if self.target == "person" else 0.405
-        height = max(1.0, altitude - marker_height)
-        depression = math.radians(-pitch) + detection.error_y * CAMERA_VERTICAL_FOV / 2.0
-        depression = max(math.radians(5.0), min(math.radians(89.0), depression))
-        ground_distance = min(20.0, height / math.tan(depression))
-        # Follow commands use MAV_FRAME_BODY_NED, so return body-axis offsets.
-        target_angle = math.radians(gimbal_yaw + self.camera_yaw_offset) + (
-            detection.error_x * CAMERA_HORIZONTAL_FOV / 2.0
-        )
-        return (
-            ground_distance * math.cos(target_angle),
-            ground_distance * math.sin(target_angle),
-        )
-
-    def _approach_velocity(self, offset, current, elapsed):
-        desired = 0.5 * offset
-        filtered = 0.4 * desired + 0.6 * current
-        max_change = 2.0 * max(elapsed, 0.0)
-        return current + max(-max_change, min(max_change, filtered - current))
-
     @staticmethod
     def _slew_angle(current, target, max_change):
         return current + max(-max_change, min(max_change, target - current))
@@ -379,36 +465,19 @@ class FollowController:
         self,
         acquire_frames=ACQUIRE_FRAMES,
         detection_timeout=DETECTION_TIMEOUT,
-        deadband=DEADBAND,
-        gain=PROPORTIONAL_GAIN,
-        integral_gain=INTEGRAL_GAIN,
-        smoothing=SMOOTHING,
-        max_acceleration=MAX_ACCELERATION,
-        max_speed=2.0,
-        follow_motion_enabled=True,
     ):
         self.acquire_frames = acquire_frames
         self.detection_timeout = detection_timeout
-        self.deadband = deadband
-        self.gain = gain
-        self.integral_gain = integral_gain
-        self.smoothing = smoothing
-        self.max_acceleration = max_acceleration
-        self.max_speed = max_speed
-        self.follow_motion_enabled = follow_motion_enabled
         self.state = FollowState.IDLE
         self.enabled = True
         self.stable_frames = 0
         self.last_observation = -1
-        self.command = VelocityCommand()
-        self.tracked_detection = None
-        self.forward_integral = 0.0
-        self.right_integral = 0.0
 
     def toggle(self):
         self.enabled = not self.enabled
         if not self.enabled:
-            self._stop(FollowState.IDLE, clear_target=True)
+            self.state = FollowState.IDLE
+            self.stable_frames = 0
 
     def step(
         self,
@@ -417,12 +486,12 @@ class FollowController:
         observation_time,
         now,
         vehicle_ready,
-        elapsed,
     ):
         if not self.enabled or not vehicle_ready:
             self.last_observation = observation
             self.stable_frames = 0
-            return self._stop(FollowState.IDLE, clear_target=True)
+            self.state = FollowState.IDLE
+            return VelocityCommand()
 
         if self.state is FollowState.IDLE:
             self.state = FollowState.ACQUIRE
@@ -433,7 +502,6 @@ class FollowController:
                 if self.state is not FollowState.TRACK:
                     self.stable_frames = 0
             else:
-                self.tracked_detection = detection
                 if self.state is not FollowState.TRACK:
                     self.stable_frames += 1
                     if self.stable_frames >= self.acquire_frames:
@@ -441,70 +509,9 @@ class FollowController:
 
         if now - observation_time > self.detection_timeout:
             self.stable_frames = 0
-            return self._stop(FollowState.LOST, clear_target=True)
+            self.state = FollowState.LOST
 
-        if self.state is not FollowState.TRACK or self.tracked_detection is None:
-            return self._stop(self.state)
-
-        if not self.follow_motion_enabled:
-            return self._stop(FollowState.TRACK)
-
-        forward_error = self._deadband(-self.tracked_detection.error_y)
-        right_error = self._deadband(self.tracked_detection.error_x)
-        self.forward_integral = self._integrate(
-            self.forward_integral, forward_error, elapsed
-        )
-        self.right_integral = self._integrate(
-            self.right_integral, right_error, elapsed
-        )
-        desired_forward = (
-            self.gain * forward_error + self.integral_gain * self.forward_integral
-        )
-        desired_right = (
-            self.gain * right_error + self.integral_gain * self.right_integral
-        )
-        magnitude = math.hypot(desired_forward, desired_right)
-        if magnitude > self.max_speed:
-            scale = self.max_speed / magnitude
-            desired_forward *= scale
-            desired_right *= scale
-
-        filtered_forward = (
-            self.smoothing * desired_forward
-            + (1.0 - self.smoothing) * self.command.forward
-        )
-        filtered_right = (
-            self.smoothing * desired_right
-            + (1.0 - self.smoothing) * self.command.right
-        )
-        max_change = self.max_acceleration * max(elapsed, 0.0)
-        self.command = VelocityCommand(
-            self._approach(self.command.forward, filtered_forward, max_change),
-            self._approach(self.command.right, filtered_right, max_change),
-        )
-        return self.command
-
-    def _deadband(self, error):
-        return 0.0 if abs(error) <= self.deadband else error
-
-    def _integrate(self, integral, error, elapsed):
-        if error and integral * error < 0.0:
-            integral *= 0.5
-        limit = self.max_speed / self.integral_gain
-        return max(-limit, min(limit, integral + error * max(elapsed, 0.0)))
-
-    @staticmethod
-    def _approach(current, target, max_change):
-        return current + max(-max_change, min(max_change, target - current))
-
-    def _stop(self, state, clear_target=False):
-        self.state = state
-        self.command = VelocityCommand()
-        if clear_target:
-            self.tracked_detection = None
-        self.forward_integral = 0.0
-        self.right_integral = 0.0
-        return self.command
+        return VelocityCommand()
 
 
 class VehicleStatus:
@@ -654,16 +661,16 @@ def parse_args():
         default="udpin:127.0.0.1:14551",
         help="pymavlink connection string (default: %(default)s)",
     )
-    parser.add_argument("--max-speed", type=float, default=0.5)
+    parser.add_argument("--max-speed", type=float, default=1.0)
     parser.add_argument(
-        "--enable-follow-motion",
+        "--no-follow-motion",
         action="store_true",
-        help="experimental: allow active pursuit using uncalibrated camera geometry",
+        help="search and point the gimbal without pursuing the target",
     )
     parser.add_argument(
         "--max-flight-radius",
         type=float,
-        default=5.0,
+        default=12.0,
         help="stop movement this far from the follower's starting point (default: %(default)s m)",
     )
     parser.add_argument(
@@ -680,12 +687,6 @@ def parse_args():
     parser.add_argument("--scan-yaw-min", type=float, default=-60.0)
     parser.add_argument("--scan-yaw-max", type=float, default=60.0)
     parser.add_argument("--scan-rate", type=float, default=30.0)
-    parser.add_argument(
-        "--camera-yaw-offset",
-        type=float,
-        default=0.0,
-        help="camera bearing correction relative to the vehicle body (default: %(default)s degrees)",
-    )
     parser.add_argument("--min-area", type=float)
     parser.add_argument("--frame-timeout", type=float, default=10.0)
     parser.add_argument("--heartbeat-timeout", type=float, default=15.0)
@@ -700,23 +701,38 @@ def parse_args():
 
 
 def validate_args(args):
-    if args.max_speed <= 0 or args.max_flight_radius <= 0:
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (args.max_speed, args.max_flight_radius)
+    ):
         return "max speed and flight radius must be positive"
-    if args.min_area is not None and args.min_area <= 0:
+    if args.min_area is not None and (not math.isfinite(args.min_area) or args.min_area <= 0):
         return "--min-area must be positive"
-    if args.frame_timeout <= 0 or args.heartbeat_timeout <= 0:
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (args.frame_timeout, args.heartbeat_timeout)
+    ):
         return "timeouts must be positive"
-    if args.duration < 0:
+    if not math.isfinite(args.duration) or args.duration < 0:
         return "--duration cannot be negative"
-    if args.search_radius <= 0 or args.search_speed <= 0 or args.search_timeout <= 0:
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (args.search_radius, args.search_speed, args.search_timeout)
+    ):
         return "search radius, speed, and timeout must be positive"
-    if args.scan_rate <= 0 or args.scan_pitch_step <= 0:
+    if any(
+        not math.isfinite(value) or value <= 0
+        for value in (args.scan_rate, args.scan_pitch_step)
+    ):
         return "scan rate and pitch step must be positive"
-    if not math.isfinite(args.camera_yaw_offset):
-        return "--camera-yaw-offset must be finite"
+    if not all(
+        math.isfinite(value)
+        for value in (args.scan_pitch_min, args.scan_pitch_max, args.scan_yaw_min, args.scan_yaw_max)
+    ):
+        return "scan limits must be finite"
     if args.scan_pitch_min >= args.scan_pitch_max:
         return "scan pitch limits must be ordered"
-    if not -135.0 <= args.scan_pitch_min < args.scan_pitch_max <= 45.0:
+    if not -90.0 <= args.scan_pitch_min < args.scan_pitch_max <= 45.0:
         return "scan pitch limits must stay within the simulated gimbal range"
     if not -160.0 <= args.scan_yaw_min < args.scan_yaw_max <= 160.0:
         return "scan yaw limits must be ordered and stay within the simulated gimbal range"
@@ -836,6 +852,8 @@ def main():
     camera_frames = 0
     last_camera_frame_at = time.monotonic()
     format_error = []
+    camera_pose_lock = threading.Lock()
+    latest_camera_pose = None
 
     def image_callback(message):
         nonlocal latest_frame, frame_sequence, camera_frames, last_camera_frame_at
@@ -854,9 +872,24 @@ def main():
             frame_condition.notify()
         first_frame.set()
 
+    def pose_callback(message):
+        nonlocal latest_camera_pose
+        now = time.monotonic()
+        poses = {pose.name: pose for pose in message.pose}
+        if all(name in poses for name in ("iris_with_gimbal", "gimbal", "pitch_link")):
+            camera_pose = camera_pose_from_links(
+                poses["iris_with_gimbal"], poses["gimbal"], poses["pitch_link"], now
+            )
+            with camera_pose_lock:
+                latest_camera_pose = camera_pose
+
     node = Node()
     if not node.subscribe(GzImage, args.topic, image_callback):
         print("Error: Gazebo rejected the camera subscription.", file=sys.stderr)
+        connection.close()
+        return 1
+    if args.search and not node.subscribe(Pose_V, CAMERA_POSE_TOPIC, pose_callback):
+        print("Error: Gazebo rejected the camera-pose subscription.", file=sys.stderr)
         connection.close()
         return 1
     if not first_frame.wait(timeout=args.frame_timeout):
@@ -871,10 +904,7 @@ def main():
         connection.close()
         return 1
 
-    fixed_controller = FollowController(
-        max_speed=args.max_speed,
-        follow_motion_enabled=args.enable_follow_motion,
-    )
+    fixed_controller = FollowController()
     search_controller = SearchController(
         target=args.target,
         max_speed=args.max_speed,
@@ -887,8 +917,7 @@ def main():
         scan_yaw_min=args.scan_yaw_min,
         scan_yaw_max=args.scan_yaw_max,
         scan_rate=args.scan_rate,
-        camera_yaw_offset=args.camera_yaw_offset,
-        follow_motion_enabled=args.enable_follow_motion,
+        follow_motion_enabled=not args.no_follow_motion,
     )
     controller = search_controller if args.search else fixed_controller
     memory = drone_cv.TargetMemory(max_missed_frames=5)
@@ -926,7 +955,7 @@ def main():
     print(
         f"{action}; target={args.target}, max follow speed={args.max_speed:g} m/s, "
         f"flight radius={args.max_flight_radius:g} m, "
-        f"active pursuit={'on' if args.enable_follow_motion else 'off'}. "
+        f"active pursuit={'on' if args.search and not args.no_follow_motion else 'off'}. "
         "Press s to stop/start tracking, q to quit, or Ctrl+C.",
         flush=True,
     )
@@ -955,7 +984,14 @@ def main():
                     frame = None
 
             if frame is not None:
-                latest_detection = drone_cv.detect_marker(frame, marker, args.min_area)
+                reference = (
+                    search_controller.last_detection
+                    if args.search and search_controller.state in (SearchState.LOCK, SearchState.TRACK)
+                    else None
+                )
+                latest_detection = drone_cv.detect_marker(
+                    frame, marker, args.min_area, reference=reference
+                )
                 if latest_detection is not None:
                     latest_detection_time = now
                 remembered_detection, perception_status = memory.update(latest_detection)
@@ -996,6 +1032,8 @@ def main():
                     last_gate_reason = gate_reason
                 previous_state = controller.state
                 if args.search:
+                    with camera_pose_lock:
+                        camera_pose = latest_camera_pose
                     search_output = search_controller.step(
                         latest_detection,
                         processed_sequence,
@@ -1006,6 +1044,7 @@ def main():
                         vehicle.local_position,
                         vehicle.yaw,
                         vehicle.relative_altitude,
+                        camera_pose,
                     )
                     command = search_output.velocity
                     if ready:
@@ -1030,7 +1069,6 @@ def main():
                         latest_detection_time,
                         now,
                         ready,
-                        now - previous_control,
                     )
                     if ready or (vehicle.armed and now - vehicle.last_heartbeat <= TELEMETRY_TIMEOUT):
                         send_velocity(connection, command)
@@ -1105,6 +1143,9 @@ def main():
                     + (
                         f" gimbal=({search_output.gimbal_pitch:+.1f},"
                         f"{search_output.gimbal_yaw:+.1f})"
+                        f" offset=({search_output.target_forward:+.1f},"
+                        f"{search_output.target_right:+.1f})"
+                        f" geometry={search_controller.geometry_error or 'ready'}"
                         + (
                             f" goal=({search_output.position_target[0]:+.2f},"
                             f"{search_output.position_target[1]:+.2f})"

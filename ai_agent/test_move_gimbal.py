@@ -41,6 +41,8 @@ class MoveGimbalTest(unittest.TestCase):
     def test_rejects_angle_outside_simulated_mount_range(self):
         with self.assertRaises(ValueError):
             move_gimbal.check_angle("pitch", 46.0, move_gimbal.PITCH_RANGE)
+        with self.assertRaises(ValueError):
+            move_gimbal.check_angle("pitch", -95.0, move_gimbal.PITCH_RANGE)
 
 
 if __name__ == "__main__":

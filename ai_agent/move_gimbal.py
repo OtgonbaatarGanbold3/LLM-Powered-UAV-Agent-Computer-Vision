@@ -8,7 +8,7 @@ import time
 from pymavlink import mavutil
 
 
-PITCH_RANGE = (-135.0, 45.0)
+PITCH_RANGE = (-90.0, 45.0)
 YAW_RANGE = (-160.0, 160.0)
 TEST_SEQUENCE = (
     (0.0, 0.0),

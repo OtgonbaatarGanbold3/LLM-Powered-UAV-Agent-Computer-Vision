@@ -10,19 +10,21 @@ moving targets, and a stationary drone at its spawn pose. The missing heartbeat 
 reproduced when MAVProxy started without an interactive terminal; the launcher now
 checks for one and the follower reports a clearer connection error.
 
-Armed search reached `RASTER`, `MOVE`, `LOCK`, and `TRACK`. The moving-car test exposed
-a geometry error: the marker stayed centered while the drone traveled roughly 28 m
-away from the target area. The follower now defaults to 0.5 m/s and latches a stop
-at a 5 m flight radius. A 1 m test boundary triggered and the drone held afterward,
-with about 0.16 m stopping overshoot. A trial bearing correction still moved away
-from the target, so active pursuit is now opt-in (`--enable-follow-motion`) while
-gimbal tracking and bounded search remain available. Marker centering alone is not
-proof of successful target following.
+Armed search reached `RASTER`, `MOVE`, `LOCK`, and `TRACK`. An earlier moving-car
+test exposed a geometry error: the marker stayed centered while the drone traveled
+roughly 28 m away from the target area. The current follower composes the measured
+Gazebo camera pose from the drone and gimbal transforms and projects the detection
+onto the target-height plane. In an 80-frame world-position comparison, the median
+car-position error was about 0.09 m. Bounded SITL runs showed the drone following
+the car after lock; active pursuit now runs in search mode by default and stops on
+stale pose, stale detection, or the 12 m flight-radius boundary. `--no-follow-motion`
+keeps the gimbal tracking without target pursuit; bounded search can still move
+if no target is found.
 
-The present detector selects the yellow marker on the car or the cyan marker on the
-pedestrian. It does not recognize an ordinary car or person from appearance or a
-description. The current gimbal-based ground offset also uses commanded angles and
-assumed target height, so it is an estimate rather than a calibrated distance.
+The present detector selects the yellow marker beside the red car body or the cyan
+marker on the pedestrian. It does not recognize an ordinary car or person from
+appearance or a description. The camera ray still uses an assumed target height
+and a flat plane; a real vehicle needs calibrated camera pose and measured depth.
 
 ## Target capability
 
