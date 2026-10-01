@@ -1,13 +1,23 @@
 # Computer Vision Upgrade Plan
 
-## Current checkpoint
+## Current checkpoint (updated 2026-10-01)
 
 The project has simulator-tested MAVLink gimbal commands, deterministic car and
-pedestrian paths, color-marker detection, and fixed-camera following. The newer
-gimbal raster and limited drone search are implemented and have controller tests;
-their full closed-loop behavior in armed SITL still needs validation. A recent local
-run reported a missing MAVLink heartbeat and unexpected drone motion, so repeatable
-startup is the immediate blocker.
+pedestrian paths, color-marker detection, and fixed-camera tracking. The newer
+gimbal raster and limited drone search are implemented and have controller tests.
+Three clean disarmed launches passed a passive preflight: heartbeat, camera frames,
+moving targets, and a stationary drone at its spawn pose. The missing heartbeat was
+reproduced when MAVProxy started without an interactive terminal; the launcher now
+checks for one and the follower reports a clearer connection error.
+
+Armed search reached `RASTER`, `MOVE`, `LOCK`, and `TRACK`. The moving-car test exposed
+a geometry error: the marker stayed centered while the drone traveled roughly 28 m
+away from the target area. The follower now defaults to 0.5 m/s and latches a stop
+at a 5 m flight radius. A 1 m test boundary triggered and the drone held afterward,
+with about 0.16 m stopping overshoot. A trial bearing correction still moved away
+from the target, so active pursuit is now opt-in (`--enable-follow-motion`) while
+gimbal tracking and bounded search remain available. Marker centering alone is not
+proof of successful target following.
 
 The present detector selects the yellow marker on the car or the cyan marker on the
 pedestrian. It does not recognize an ordinary car or person from appearance or a
@@ -104,6 +114,8 @@ and disconnecting the LLM side does not prevent an operator stop.
 
 ## Next implementation task
 
-Finish step 1, including the heartbeat and unexpected-motion investigation. Then
-collect the step 2 clips and benchmark YOLO-World before integrating a detector into
-the flight loop. Reference: [YOLO-World paper](https://arxiv.org/abs/2401.17270).
+Finish step 1 by calibrating camera/gimbal geometry and verifying that the drone
+moves toward the target in Gazebo world coordinates, then repeat the full armed
+sequence three times. The passive startup check is `./run_ai_agent.sh preflight`.
+After that, collect the step 2 clips and benchmark YOLO-World before integrating a
+detector into the flight loop. Reference: [YOLO-World paper](https://arxiv.org/abs/2401.17270).

@@ -5,7 +5,7 @@ repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 venv_root="${ARDUPILOT_VENV:-$HOME/venv-ardupilot}"
 
 usage() {
-    echo "Usage: $0 camera [options] | track [options] | follow [options] | gimbal [options] | world-check [options]" >&2
+    echo "Usage: $0 camera [options] | track [options] | follow [options] | gimbal [options] | world-check [options] | preflight [options]" >&2
 }
 
 if [[ $# -eq 0 ]]; then
@@ -31,6 +31,10 @@ case "$action" in
     world-check)
         script="$repo_root/ai_agent/check_target_motion.py"
         dependency_check='from gz.transport13 import Node; from gz.msgs10.pose_v_pb2 import Pose_V'
+        ;;
+    preflight)
+        script="$repo_root/ai_agent/check_sim_baseline.py"
+        dependency_check='import cv2, pymavlink; from gz.transport13 import Node; from gz.msgs10.pose_v_pb2 import Pose_V; from gz.msgs10.image_pb2 import Image'
         ;;
     *)
         usage

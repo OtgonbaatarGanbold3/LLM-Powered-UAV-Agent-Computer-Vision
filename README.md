@@ -269,9 +269,21 @@ Wait until Gazebo is fully loaded before starting SITL.
 
 The launcher automatically uses `~/venv-ardupilot` when the current Python does not
 have the required packages. Set `ARDUPILOT_VENV=/path/to/venv` if your environment is
-elsewhere. It also loads the project and gimbal parameter files. MAVProxy sends
-telemetry to QGroundControl on UDP 14550 and to companion scripts on UDP 14551. Pass
+elsewhere. Run it in an interactive terminal; MAVProxy needs terminal input to keep
+its telemetry outputs alive. It also loads the project and gimbal parameter files.
+MAVProxy sends telemetry to QGroundControl on UDP 14550 and to companion scripts on UDP 14551. Pass
 `--console --map` to the launcher if the MAVProxy graphical tools are wanted.
+
+Before arming, check the disarmed simulator baseline in a third terminal:
+
+```bash
+./run_ai_agent.sh preflight
+```
+
+This passively checks the MAVLink heartbeat, camera frames, moving targets, and that
+the drone stays near its initial Gazebo pose. Run it after each clean startup; it
+does not arm or command the vehicle. Use `./run_ardupilot.sh -w` when a repeatable
+run needs fresh ArduPilot parameters instead of the saved `eeprom.bin`.
 
 **Arm and take off** from the MAVProxy console:
 
@@ -303,14 +315,14 @@ For a timed test without a window:
 ```
 
 After arming in GUIDED, taking off to 10 m, and pointing the gimbal down, run the
-fixed-camera follower with:
+fixed-camera tracker with:
 
 ```bash
 ./run_ai_agent.sh follow --target car
 ./run_ai_agent.sh follow --target person
 ```
 
-To start the coordinated search, gimbal lock, and active follow mode, use:
+To start the coordinated search and gimbal lock mode, use:
 
 ```bash
 ./run_ai_agent.sh follow --target car --search
@@ -323,12 +335,21 @@ left-to-right across three pitch rows (-85° to -45° by default). The terminal 
 or heading gate changes. The camera overlay also shows the current gate. If a complete
 raster finds no target, a small expanding spiral and circle starts (1.5 m radius,
 0.2 m/s) while the gimbal keeps scanning. A detected marker stops search movement;
-the gimbal centers it and, after stable centered detections, the drone follows the
-estimated ground offset. Search movement stops after 90 seconds or if the aircraft
+the gimbal centers it while the drone holds position. Active pursuit is disabled by
+default because the current camera-to-body projection has not passed a Gazebo
+world-position check. Search movement stops after 90 seconds or if the aircraft
 exceeds 2.5 m from its recorded search center. Tune the scan with `--scan-yaw-min`,
 `--scan-yaw-max`, `--scan-pitch-min`, `--scan-pitch-max`, `--scan-pitch-step`, and
 `--scan-rate`; tune the fallback with `--search-radius`, `--search-speed`, and
 `--search-timeout`.
+
+Both follow modes require fresh local-position telemetry and stop issuing movement
+commands 5 m from where the follower started; restart the follower to reset this
+boundary. The default pursuit speed is 0.5 m/s. `--enable-follow-motion` permits
+experimental active pursuit in SITL, with `--camera-yaw-offset` available for
+calibration. A car can stay centered in the image even when the drone moves away
+from it, so use Gazebo world pose or telemetry to confirm actual tracking before
+enabling pursuit on a real vehicle.
 
 To confirm target models are moving in Gazebo independently of the camera, run this
 in another terminal while Gazebo is running:

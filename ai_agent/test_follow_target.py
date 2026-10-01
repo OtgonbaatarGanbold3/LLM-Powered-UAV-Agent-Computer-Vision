@@ -105,8 +105,31 @@ class FollowControllerTest(unittest.TestCase):
         self.assertEqual(stopped, follow_target.VelocityCommand())
         self.assertEqual(controller.state, follow_target.FollowState.IDLE)
 
+    def test_fixed_tracking_without_pursuit_sends_zero(self):
+        controller = follow_target.FollowController(
+            acquire_frames=1, follow_motion_enabled=False
+        )
+
+        command = controller.step(detection(), 1, 0.0, 0.0, True, 0.1)
+
+        self.assertEqual(controller.state, follow_target.FollowState.TRACK)
+        self.assertEqual(command, follow_target.VelocityCommand())
+
 
 class SearchControllerTest(unittest.TestCase):
+    def test_tracking_without_pursuit_keeps_drone_stationary(self):
+        controller = follow_target.SearchController(target="car", follow_motion_enabled=False)
+        controller.state = follow_target.SearchState.TRACK
+        controller.last_detection = detection(0.0, 0.0)
+
+        output = controller.step(
+            detection(0.0, 0.0), 1, 0.0, 0.0, 0.1, True,
+            (0.0, 0.0, -10.0), 0.0, 10.0,
+        )
+
+        self.assertEqual(output.state, follow_target.SearchState.TRACK)
+        self.assertEqual(output.velocity, follow_target.VelocityCommand())
+
     def test_raster_holds_position_until_full_gimbal_scan_finishes(self):
         controller = follow_target.SearchController(
             target="car",
@@ -153,6 +176,19 @@ class SearchControllerTest(unittest.TestCase):
         )
 
         self.assertEqual(output.state, follow_target.SearchState.LOCK)
+        self.assertIsNone(output.position_target)
+        self.assertEqual(output.velocity, follow_target.VelocityCommand())
+
+    def test_manual_stop_disables_search_motion(self):
+        controller = follow_target.SearchController(target="car")
+        controller.toggle()
+
+        output = controller.step(
+            None, 1, 0.0, 0.0, 0.1, True, (0.0, 0.0, -10.0), 0.0, 10.0
+        )
+
+        self.assertFalse(controller.enabled)
+        self.assertEqual(output.state, follow_target.SearchState.IDLE)
         self.assertIsNone(output.position_target)
         self.assertEqual(output.velocity, follow_target.VelocityCommand())
 

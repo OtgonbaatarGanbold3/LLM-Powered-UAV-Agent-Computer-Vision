@@ -6,6 +6,12 @@ ardupilot_root="$repo_root/ardupilot-dbox"
 gimbal_params="$repo_root/gz_ws/src/ardupilot_gazebo/config/gazebo-iris-gimbal.parm"
 venv_root="${ARDUPILOT_VENV:-$HOME/venv-ardupilot}"
 
+if [[ ! -t 0 ]]; then
+    echo "SITL needs an interactive terminal for MAVProxy telemetry and commands." >&2
+    echo "Open a terminal and run ./run_ardupilot.sh there (or allocate a PTY)." >&2
+    exit 1
+fi
+
 has_ardupilot_python() {
     python3 -c 'import pexpect, pymavlink' >/dev/null 2>&1 &&
         command -v mavproxy.py >/dev/null 2>&1

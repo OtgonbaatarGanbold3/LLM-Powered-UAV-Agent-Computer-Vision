@@ -84,6 +84,8 @@ class SearchController:
         scan_yaw_min=-60.0,
         scan_yaw_max=60.0,
         scan_rate=30.0,
+        camera_yaw_offset=0.0,
+        follow_motion_enabled=True,
     ):
         self.target = target
         self.max_speed = max_speed
@@ -96,6 +98,8 @@ class SearchController:
         self.scan_yaw_min = scan_yaw_min
         self.scan_yaw_max = scan_yaw_max
         self.scan_rate = scan_rate
+        self.camera_yaw_offset = camera_yaw_offset
+        self.follow_motion_enabled = follow_motion_enabled
         self.state = SearchState.RASTER
         self.enabled = True
         self.origin = None
@@ -233,6 +237,10 @@ class SearchController:
                     self.state = SearchState.TRACK
                 return self._output()
 
+            if not self.follow_motion_enabled:
+                self.command = VelocityCommand()
+                return self._output()
+
             forward, right = self._target_offset(
                 current_detection, self.pitch, self.yaw, altitude
             )
@@ -331,7 +339,7 @@ class SearchController:
         depression = max(math.radians(5.0), min(math.radians(89.0), depression))
         ground_distance = min(20.0, height / math.tan(depression))
         # Follow commands use MAV_FRAME_BODY_NED, so return body-axis offsets.
-        target_angle = math.radians(gimbal_yaw) + (
+        target_angle = math.radians(gimbal_yaw + self.camera_yaw_offset) + (
             detection.error_x * CAMERA_HORIZONTAL_FOV / 2.0
         )
         return (
@@ -377,6 +385,7 @@ class FollowController:
         smoothing=SMOOTHING,
         max_acceleration=MAX_ACCELERATION,
         max_speed=2.0,
+        follow_motion_enabled=True,
     ):
         self.acquire_frames = acquire_frames
         self.detection_timeout = detection_timeout
@@ -386,6 +395,7 @@ class FollowController:
         self.smoothing = smoothing
         self.max_acceleration = max_acceleration
         self.max_speed = max_speed
+        self.follow_motion_enabled = follow_motion_enabled
         self.state = FollowState.IDLE
         self.enabled = True
         self.stable_frames = 0
@@ -435,6 +445,9 @@ class FollowController:
 
         if self.state is not FollowState.TRACK or self.tracked_detection is None:
             return self._stop(self.state)
+
+        if not self.follow_motion_enabled:
+            return self._stop(FollowState.TRACK)
 
         forward_error = self._deadband(-self.tracked_detection.error_y)
         right_error = self._deadband(self.tracked_detection.error_x)
@@ -641,7 +654,18 @@ def parse_args():
         default="udpin:127.0.0.1:14551",
         help="pymavlink connection string (default: %(default)s)",
     )
-    parser.add_argument("--max-speed", type=float, default=2.0)
+    parser.add_argument("--max-speed", type=float, default=0.5)
+    parser.add_argument(
+        "--enable-follow-motion",
+        action="store_true",
+        help="experimental: allow active pursuit using uncalibrated camera geometry",
+    )
+    parser.add_argument(
+        "--max-flight-radius",
+        type=float,
+        default=5.0,
+        help="stop movement this far from the follower's starting point (default: %(default)s m)",
+    )
     parser.add_argument(
         "--search",
         action="store_true",
@@ -656,9 +680,15 @@ def parse_args():
     parser.add_argument("--scan-yaw-min", type=float, default=-60.0)
     parser.add_argument("--scan-yaw-max", type=float, default=60.0)
     parser.add_argument("--scan-rate", type=float, default=30.0)
+    parser.add_argument(
+        "--camera-yaw-offset",
+        type=float,
+        default=0.0,
+        help="camera bearing correction relative to the vehicle body (default: %(default)s degrees)",
+    )
     parser.add_argument("--min-area", type=float)
     parser.add_argument("--frame-timeout", type=float, default=10.0)
-    parser.add_argument("--heartbeat-timeout", type=float, default=5.0)
+    parser.add_argument("--heartbeat-timeout", type=float, default=15.0)
     parser.add_argument(
         "--duration",
         type=float,
@@ -670,8 +700,8 @@ def parse_args():
 
 
 def validate_args(args):
-    if args.max_speed <= 0:
-        return "--max-speed must be positive"
+    if args.max_speed <= 0 or args.max_flight_radius <= 0:
+        return "max speed and flight radius must be positive"
     if args.min_area is not None and args.min_area <= 0:
         return "--min-area must be positive"
     if args.frame_timeout <= 0 or args.heartbeat_timeout <= 0:
@@ -682,6 +712,8 @@ def validate_args(args):
         return "search radius, speed, and timeout must be positive"
     if args.scan_rate <= 0 or args.scan_pitch_step <= 0:
         return "scan rate and pitch step must be positive"
+    if not math.isfinite(args.camera_yaw_offset):
+        return "--camera-yaw-offset must be finite"
     if args.scan_pitch_min >= args.scan_pitch_max:
         return "scan pitch limits must be ordered"
     if not -135.0 <= args.scan_pitch_min < args.scan_pitch_max <= 45.0:
@@ -770,7 +802,9 @@ def main():
         return 1
     if heartbeat is None:
         print(
-            f"Error: no ArduPilot heartbeat within {args.heartbeat_timeout:g} seconds.",
+            f"Error: no ArduPilot heartbeat within {args.heartbeat_timeout:g} seconds "
+            f"on {args.connect}. Check that ./run_ardupilot.sh is running in an "
+            "interactive terminal and MAVProxy reports a connected vehicle.",
             file=sys.stderr,
         )
         connection.close()
@@ -837,7 +871,10 @@ def main():
         connection.close()
         return 1
 
-    fixed_controller = FollowController(max_speed=args.max_speed)
+    fixed_controller = FollowController(
+        max_speed=args.max_speed,
+        follow_motion_enabled=args.enable_follow_motion,
+    )
     search_controller = SearchController(
         target=args.target,
         max_speed=args.max_speed,
@@ -850,6 +887,8 @@ def main():
         scan_yaw_min=args.scan_yaw_min,
         scan_yaw_max=args.scan_yaw_max,
         scan_rate=args.scan_rate,
+        camera_yaw_offset=args.camera_yaw_offset,
+        follow_motion_enabled=args.enable_follow_motion,
     )
     controller = search_controller if args.search else fixed_controller
     memory = drone_cv.TargetMemory(max_missed_frames=5)
@@ -864,6 +903,9 @@ def main():
     error_y_total = 0.0
     command_count = 0
     nonzero_commands = 0
+    position_targets = 0
+    flight_origin = None
+    flight_radius_hit = False
     latest_display = None
     perception_status = "SEARCHING"
     gate_reason = "initializing"
@@ -879,10 +921,12 @@ def main():
     action = (
         "Search mode enabled (--search): gimbal raster first, drone movement only if needed"
         if args.search
-        else "Search mode disabled: fixed-camera following only"
+        else "Search mode disabled: fixed-camera target tracking"
     )
     print(
-        f"{action}; target={args.target}, max follow speed={args.max_speed:g} m/s. "
+        f"{action}; target={args.target}, max follow speed={args.max_speed:g} m/s, "
+        f"flight radius={args.max_flight_radius:g} m, "
+        f"active pursuit={'on' if args.enable_follow_motion else 'off'}. "
         "Press s to stop/start tracking, q to quit, or Ctrl+C.",
         flush=True,
     )
@@ -933,7 +977,20 @@ def main():
 
             vehicle.drain(connection, now)
             if now >= next_control:
-                ready, gate_reason = vehicle.readiness(now, require_local=args.search)
+                ready, gate_reason = vehicle.readiness(now, require_local=True)
+                if ready and flight_origin is None:
+                    flight_origin = vehicle.local_position[:2]
+                if (
+                    ready
+                    and not flight_radius_hit
+                    and math.dist(vehicle.local_position[:2], flight_origin) >= args.max_flight_radius
+                ):
+                    flight_radius_hit = True
+                    if controller.enabled:
+                        controller.toggle()
+                if flight_radius_hit:
+                    ready = False
+                    gate_reason = f"flight radius {args.max_flight_radius:g} m reached; restart required"
                 if gate_reason != last_gate_reason:
                     print(f"vehicle gate: {gate_reason}", flush=True)
                     last_gate_reason = gate_reason
@@ -951,22 +1008,21 @@ def main():
                         vehicle.relative_altitude,
                     )
                     command = search_output.velocity
-                    if search_output.position_target is None:
-                        if (
-                            search_output.state is not SearchState.TRACK
-                            and vehicle.local_position is not None
-                            and now - vehicle.last_local_position <= TELEMETRY_TIMEOUT
-                        ):
-                            send_local_position(connection, vehicle.local_position)
-                        else:
+                    if ready:
+                        if search_output.position_target is not None:
+                            send_local_position(connection, search_output.position_target)
+                            position_targets += 1
+                        elif search_output.state is SearchState.TRACK:
                             send_velocity(connection, command)
-                    else:
-                        send_local_position(connection, search_output.position_target)
-                    send_gimbal_angle(
-                        connection,
-                        search_output.gimbal_pitch,
-                        search_output.gimbal_yaw,
-                    )
+                        else:
+                            send_local_position(connection, vehicle.local_position)
+                        send_gimbal_angle(
+                            connection,
+                            search_output.gimbal_pitch,
+                            search_output.gimbal_yaw,
+                        )
+                    elif vehicle.armed and now - vehicle.last_heartbeat <= TELEMETRY_TIMEOUT:
+                        send_velocity(connection, VelocityCommand())
                 else:
                     command = fixed_controller.step(
                         latest_detection,
@@ -976,7 +1032,8 @@ def main():
                         ready,
                         now - previous_control,
                     )
-                    send_velocity(connection, command)
+                    if ready or (vehicle.armed and now - vehicle.last_heartbeat <= TELEMETRY_TIMEOUT):
+                        send_velocity(connection, command)
                 if controller.state is not previous_state:
                     print(
                         f"control {previous_state.value}->{controller.state.value} "
@@ -1026,13 +1083,14 @@ def main():
                         controller.toggle()
                         if (
                             args.search
+                            and ready
                             and not controller.enabled
                             and vehicle.local_position is not None
                             and time.monotonic() - vehicle.last_local_position
                             <= TELEMETRY_TIMEOUT
                         ):
                             send_local_position(connection, vehicle.local_position)
-                        elif not controller.enabled:
+                        elif not controller.enabled and vehicle.armed:
                             send_velocity(connection, VelocityCommand())
 
             if args.no_display and now >= next_report:
@@ -1047,6 +1105,12 @@ def main():
                     + (
                         f" gimbal=({search_output.gimbal_pitch:+.1f},"
                         f"{search_output.gimbal_yaw:+.1f})"
+                        + (
+                            f" goal=({search_output.position_target[0]:+.2f},"
+                            f"{search_output.position_target[1]:+.2f})"
+                            if search_output.position_target is not None
+                            else ""
+                        )
                         if args.search
                         else ""
                     ),
@@ -1061,11 +1125,12 @@ def main():
         for _ in range(3):
             if (
                 args.search
+                and vehicle.armed
                 and vehicle.local_position is not None
                 and time.monotonic() - vehicle.last_local_position <= TELEMETRY_TIMEOUT
             ):
                 send_local_position(connection, vehicle.local_position)
-            else:
+            elif vehicle.armed:
                 send_velocity(connection, VelocityCommand())
             time.sleep(0.05)
         connection.close()
@@ -1083,7 +1148,8 @@ def main():
         f"detections={detected_frames}/{processed_frames} losses={memory.loss_count} "
         f"tracking_frames={tracking_frames} centered={centered_percent:.1f}% "
         f"mean_abs_error=({mean_error_x:.3f},{mean_error_y:.3f}) "
-        f"commands={command_count} nonzero={nonzero_commands}",
+        f"commands={command_count} nonzero_velocity={nonzero_commands} "
+        f"position_targets={position_targets}",
         flush=True,
     )
     return exit_code
