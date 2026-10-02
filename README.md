@@ -101,9 +101,8 @@ project's Gazebo changes to the checked-out upstream version.
 ## 4. Prerequisites
 
 ### Operating System
-- **Ubuntu 22.04 LTS (Jammy)** — recommended
-- Ubuntu 20.04 minimum (for OpenGL / ogre2 rendering support)
-- macOS Big Sur or later (Intel & Apple Silicon) — partially supported
+- **Ubuntu 24.04 LTS** — tested with this project
+- Ubuntu 22.04 LTS — supported by Gazebo Harmonic; this project's full setup has not been tested there
 
 ### Required Software
 
@@ -116,7 +115,7 @@ project's Gazebo changes to the checked-out upstream version.
 | OpenCV (cv2) | 4.x | Computer vision |
 | NumPy | Latest | Array operations |
 | gz-transport13 + gz-msgs10 | Harmonic | Gazebo Python bindings |
-| QGroundControl | Latest AppImage | Ground control station GUI |
+| QGroundControl | Optional AppImage | Ground control station GUI |
 | CMake | 3.22+ | Building the Gazebo plugin |
 
 ---
@@ -126,7 +125,7 @@ project's Gazebo changes to the checked-out upstream version.
 ### 5.1 Clone the Repository
 
 ```bash
-git clone --recurse-submodules git@github.com:OtgonbaatarGanbold3/LLM-Powered-UAV-Agent-Computer-Vision.git
+git clone --recurse-submodules https://github.com/OtgonbaatarGanbold3/LLM-Powered-UAV-Agent-Computer-Vision.git
 cd LLM-Powered-UAV-Agent-Computer-Vision
 ./setup_simulation.sh
 ```
@@ -148,11 +147,11 @@ sudo apt install -y git python3-pip python3-venv python3-dev \
     python3-matplotlib python3-serial python3-scipy
 
 # Create and activate the ArduPilot virtual environment
-python3 -m venv ~/venv-ardupilot
+/usr/bin/python3 -m venv --system-site-packages ~/venv-ardupilot
 source ~/venv-ardupilot/bin/activate
 
-# Install MAVProxy and pymavlink
-pip install MAVProxy pymavlink
+# ArduPilot's simulator also requires pexpect.
+pip install MAVProxy pymavlink pexpect
 
 # Build ArduCopter SITL
 cd ardupilot-dbox
@@ -178,7 +177,7 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/pkgs-
     http://packages.osrfoundation.org/gazebo/ubuntu-stable $(lsb_release -cs) main" \
     | sudo tee /etc/apt/sources.list.d/gazebo-stable.list
 sudo apt update
-sudo apt install -y gz-harmonic
+sudo apt install -y gz-harmonic python3-gz-msgs10 python3-gz-transport13
 ```
 
 Install plugin build dependencies:
@@ -228,12 +227,11 @@ source ~/.bashrc
 ```bash
 source ~/venv-ardupilot/bin/activate
 pip install pymavlink opencv-python numpy
-
-# Gazebo Python transport bindings (Harmonic):
-pip install gz-msgs10 gz-transport13
-# If the above fail, use the system packages instead:
-# sudo apt install -y python3-gz-msgs10 python3-gz-transport13
+python -c 'import cv2, numpy, pexpect, pymavlink, gz.msgs10, gz.transport13; print("Python dependencies OK")'
 ```
+
+The Gazebo bindings above come from Ubuntu packages. The virtual environment
+uses `--system-site-packages` so the agent can import them.
 
 ---
 
